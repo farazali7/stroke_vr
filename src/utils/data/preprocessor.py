@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn import preprocessing
 
-from src.utils.preprocessing import window_data, apply_filter, add_response_variable
+from src.utils.preprocessing import window_data, apply_filter, add_response_variable, interpolate_frozen_values
 from src.utils.features import *
 
 from config import cfg
@@ -33,9 +33,14 @@ def extract_feature_set(data: np.ndarray, feature_list: List[str], sampling_rate
     """
     features = pd.DataFrame()
     for feature_name in feature_list:
+        if feature_name == 'cross_spectral_density':
+            continue  # Handled separately later since it is across sensors
+
         feature_fn = eval(feature_name)
 
-        if feature_name in ['dimensionless_jerk', 'sparc']:
+        if feature_name in ['dimensionless_jerk', 'sparc', 'mean_velocity', 'mean_acceleration',
+                            'spectral_entropy', 'energy_acceleration', 'power_acceleration', 'spectral_centroid',
+                            'spectral_bandwidth']:
             feature_data = feature_fn(data, sampling_rate)
         else:
             feature_data = feature_fn(data)
@@ -49,7 +54,8 @@ def extract_feature_set(data: np.ndarray, feature_list: List[str], sampling_rate
 
 
 def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args: dict,
-                            filtering_args: dict, feature_extraction_args: dict) -> pd.DataFrame:
+                            filtering_args: dict, feature_extraction_args: dict,
+                            interp_cols: Optional[List[str]]) -> pd.DataFrame:
     """Preprocesses data within one game session.
 
     Performs filtering, windowing, feature extraction, and normalization from given session data
@@ -61,14 +67,20 @@ def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args
         windowing_args: Dictionary of kwargs for window_data function (size and overlap specified in seconds)
         filtering_args: Dictionary of kwargs for filtering (function name and args)
         feature_extraction_args: Dictionary of kwargs for extract_feature_set function
+        interp_cols: Optional list of column names that should be interpolated if any frozen values exist
 
     Returns:
         DataFrame of features from session
     """
-    session_features = pd.DataFrame()  # TODO MAKE INTO DF
+    if interp_cols is not None and len(interp_cols) > 0:
+        # Replace frozen values in certain columns with interpolated ones
+        session_df = interpolate_frozen_values(session_df, interp_cols=interp_cols)
+
+    session_features = pd.DataFrame()
+    axes = ['x', 'y', 'z']
     # Process data from inverse model and raw data columns
     for col in cols['INVERSE_AND_RAW']:
-        dimension_cols = [col+'_'+dim for dim in ['x', 'y', 'z']]
+        dimension_cols = [col + '_' + dim for dim in axes]
         raw_data = session_df[dimension_cols]
         raw_data = raw_data.to_numpy()
 
@@ -89,10 +101,55 @@ def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args
         feature_data = extract_feature_set(windowed_data, **feature_extraction_args)
 
         # Rename columns to match data column name
-        new_names = [col+'-'+x for x in feature_data.columns]
+        new_names = [col + '-' + x for x in feature_data.columns]
         feature_data.columns = new_names
 
         session_features = pd.concat([session_features, feature_data], axis=1)
+
+    # Handle cross-subject density feature (multiple columns produce feature values)
+    if 'cross_spectral_density' in feature_extraction_args['feature_list']:
+        csd_col_data = {}
+        for col in ['LeftController_localPosition',
+                    'LeftController_localRotation',
+                    'RightController_localPosition',
+                    'RightController_localRotation']:
+            dimension_cols = [col + '_' + dim for dim in ['x', 'y', 'z']]
+            raw_data = session_df[dimension_cols]
+            raw_data = raw_data.to_numpy()
+
+            # Filter data
+            filtered_data = apply_filter(raw_data, filtering_args)
+
+            # Window data
+            # Determine window size and overlap in samples
+            window_size = windowing_args['WINDOW_SIZE']
+            window_overlap = windowing_args['WINDOW_OVERLAP']
+            sampling_rate = windowing_args['sampling_rate']
+            window_sample_size = round(window_size * sampling_rate)
+            window_sample_overlap = round(window_overlap * sampling_rate)
+            windowed_data = window_data(filtered_data, window_size=window_sample_size,
+                                        overlap_size=window_sample_overlap)
+
+            csd_col_data[col] = windowed_data
+        for pair in [('LeftController_localPosition', 'RightController_localPosition'),
+                     ('LeftController_localPosition', 'RightController_localRotation'),
+                     ('LeftController_localRotation', 'RightController_localPosition'),
+                     ('LeftController_localRotation', 'RightController_localRotation')]:
+            data1_name = pair[0]
+            data2_name = pair[1]
+            for dim1 in range(0, 3):
+                data1 = csd_col_data[data1_name][..., dim1]
+                for dim2 in range(0, 3):
+                    data2 = csd_col_data[data2_name][..., dim2]
+
+                    # Extract features
+                    csd_data = cross_spectral_density(data1, data2, feature_extraction_args['sampling_rate'])
+
+                    # Rename columns to match data column name
+                    name = data1_name + axes[dim1] + '-' + data2_name + axes[dim2] + '-' + 'csd'
+                    csd_df = pd.DataFrame(csd_data, columns=[name])
+
+                    session_features = pd.concat([session_features, csd_df], axis=1)
 
     # # Process data from game data columns
     # for col in cols['GAME']:
@@ -103,8 +160,11 @@ def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args
 
     # Drop na
     session_features = session_features.replace([np.inf, -np.inf], np.nan)
-    session_features = session_features.dropna().reset_index()
-    session_features.drop('index', axis=1, inplace=True)
+    session_features = session_features.dropna().reset_index(drop=True)
+
+    # Ensure no nan or inf values exist
+    assert session_features.isna().any().any() == False, \
+        f'Got nan/inf features values for subject {session_df.Subject.iloc[0]}, session {session_df.Session.iloc[0]}'
 
     # Normalize session data
     cols_temp = session_features.columns
@@ -122,8 +182,9 @@ def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args
 
 
 def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_args: dict,
-                    feature_extraction_args: dict,  response_var_path: str,
-                    response_var_set: List[str], save_dir: Optional[str] = None) -> pd.DataFrame:
+                    feature_extraction_args: dict, response_var_path: str,
+                    response_var_set: List[str], interp_cols: Optional[List[str]],
+                    save_dir: Optional[str]) -> pd.DataFrame:
     """Preprocess specified DataFrame by extracting features and appending response variables.
 
     Extract features for given DataFrame by subject and session while also appending desired response
@@ -137,6 +198,7 @@ def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_
         feature_extraction_args: Dictionary of kwargs for extract_feature_set function
         response_var_path: Path to file containing response variable data
         response_var_set: List of response variables to include
+        interp_cols: Optional list of column names that should be interpolated if any frozen values exist
         save_dir: Optional string specifying directory to save final feature DataFrame version to disk
 
     Returns:
@@ -158,14 +220,16 @@ def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_
 
         # TODO: Remove just for debugging
         # for i in range(10):
-        #     res = preprocess_session_data(session_dfs[i], cols, windowing_args, filtering_args, feature_extraction_args)
+        #     res = preprocess_session_data(session_dfs[i], cols, windowing_args, filtering_args, feature_extraction_args,
+        #                                   interp_cols)
 
         with Pool(processes=os.cpu_count()) as pool:
             res = list(tqdm(pool.imap(partial(preprocess_session_data,
                                               cols=cols,
                                               windowing_args=windowing_args,
                                               filtering_args=filtering_args,
-                                              feature_extraction_args=feature_extraction_args),
+                                              feature_extraction_args=feature_extraction_args,
+                                              interp_cols=interp_cols),
                                       session_dfs),
                             total=len(session_dfs)))
         features.append(pd.concat(res))
@@ -185,7 +249,7 @@ def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_
         versions = [int(x.replace('v', '')) for x in os.listdir(save_dir) if 'v' in x]
         if len(versions) == 0:
             versions = [0]
-        new_version = max(versions)+1
+        new_version = max(versions) + 1
 
         # Create latest version folder
         save_path = os.path.join(save_dir, f'v{new_version}')
@@ -225,6 +289,9 @@ if __name__ == '__main__':
     feature_extractions_args = {'feature_list': cfg['FEATURES'],
                                 'sampling_rate': cfg['SAMPLING_RATE']}
 
+    interp_cols = cfg['INTERPOLATION_COLUMNS']
+    interp_cols = [f'{c}_{suffix}' for c in interp_cols for suffix in ['x', 'y', 'z']]
+
     response_var_path = cfg['PATHS']['RESPONSE_VAR']
     response_var_set = cfg['RESPONSE_VARS']
 
@@ -232,6 +299,6 @@ if __name__ == '__main__':
 
     processed_df = preprocess_data(raw_df_path, cols, windowing_args, filtering_args,
                                    feature_extractions_args, response_var_path,
-                                   response_var_set, save_dir)
+                                   response_var_set, interp_cols, save_dir)
 
     logging.info('Done')
