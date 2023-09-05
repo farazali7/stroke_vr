@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 from sklearn import preprocessing
 
-from src.utils.preprocessing import window_data, apply_filter, add_response_variable, interpolate_frozen_values
+from src.utils.preprocessing import window_data, apply_filter, add_response_variable, interpolate_frozen_values, \
+    add_pca_cols
 from src.utils.features import *
 
 from config import cfg
@@ -169,7 +170,7 @@ def preprocess_session_data(session_df: pd.DataFrame, cols: dict, windowing_args
     # Normalize session data
     cols_temp = session_features.columns
     x = session_features.values
-    ss = preprocessing.MinMaxScaler()
+    ss = preprocessing.StandardScaler()
     x_scaled = ss.fit_transform(x)
     session_features = pd.DataFrame(x_scaled, columns=cols_temp)
 
@@ -263,8 +264,8 @@ def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_
         # Also save json of config
         file_cfg = {'cols': cols,
                     'windowing_args': windowing_args,
-                    'filtering_args': filter_args,
-                    'feature_extraction_args': feature_extractions_args,
+                    'filtering_args': filtering_args,
+                    'feature_extraction_args': feature_extraction_args,
                     'response_variables': response_var_set}
         cfg_save_path = os.path.join(save_path, 'config.txt')
         with open(cfg_save_path, 'w') as f:
@@ -274,31 +275,62 @@ def preprocess_data(data_path: str, cols: dict, windowing_args: dict, filtering_
 
 
 if __name__ == '__main__':
-    raw_df_path = cfg['PATHS']['RAW']
-    cols = cfg['COLUMNS']
+    # raw_df_path = cfg['PATHS']['RAW']
+    # cols = cfg['COLUMNS']
+    #
+    # windowing_args = cfg['WINDOWING']
+    # windowing_args['sampling_rate'] = cfg['SAMPLING_RATE']
+    #
+    # filter_fn = cfg['FILTER_TYPE']
+    # filter_args = cfg['FILTERS'][filter_fn]
+    # filter_args['sampling_rate'] = cfg['SAMPLING_RATE']
+    # filtering_args = {'filter_fn': filter_fn,
+    #                   'args': filter_args}
+    #
+    # feature_extractions_args = {'feature_list': cfg['FEATURES'],
+    #                             'sampling_rate': cfg['SAMPLING_RATE']}
+    #
+    # interp_cols = cfg['INTERPOLATION_COLUMNS']
+    # interp_cols = [f'{c}_{suffix}' for c in interp_cols for suffix in ['x', 'y', 'z']]
+    #
+    # response_var_path = cfg['PATHS']['RESPONSE_VAR']
+    # response_var_set = cfg['RESPONSE_VARS']
+    #
+    # save_dir = cfg['PATHS']['FEATURE_DATA_DIR']
+    #
+    # processed_df = preprocess_data(raw_df_path, cols, windowing_args, filtering_args,
+    #                                feature_extractions_args, response_var_path,
+    #                                response_var_set, interp_cols, save_dir)
+    #
+    # logging.info('Done')
 
-    windowing_args = cfg['WINDOWING']
-    windowing_args['sampling_rate'] = cfg['SAMPLING_RATE']
+    # Adjust response vars
+    # feature_df = pd.read_pickle('data/features/v2/feature_data.pkl')
+    # feature_df = add_response_variable(feature_df, cfg['PATHS']['RESPONSE_VAR'], 'game_performance')
+    # # Set PExertion and PSatisfaction to binary
+    # feature_df['perceived_enjoyment'] = np.where(feature_df[['perceived_enjoyment_1',
+    #                                                          'perceived_enjoyment_2',
+    #                                                          'perceived_enjoyment_3']]
+    #                                              .mean(1).astype(int) > 4, 1, 0)
+    #
+    # feature_df['perceived_exertion'] = np.where(feature_df[['perceived_exertion_M',
+    #                                                         'perceived_exertion_T',
+    #                                                         'perceived_exertion_C']]
+    #                                              .mean(1).astype(int) > 3, 1, 0)
+    #
+    # feature_df.drop(columns=['perceived_enjoyment_1', 'perceived_enjoyment_2', 'perceived_enjoyment_3',
+    #                          'perceived_exertion_M', 'perceived_exertion_T', 'perceived_exertion_C'], inplace=True)
+    #
+    # # Save data file
+    # file_save_path = 'data/features/v2/feature_data.pkl'
+    # with open(file_save_path, 'wb') as f:
+    #     pickle.dump(feature_df, f)
 
-    filter_fn = cfg['FILTER_TYPE']
-    filter_args = cfg['FILTERS'][filter_fn]
-    filter_args['sampling_rate'] = cfg['SAMPLING_RATE']
-    filtering_args = {'filter_fn': filter_fn,
-                      'args': filter_args}
+    # Add PCA columns
+    feature_df = pd.read_pickle(cfg['PATHS']['FEATURE_DATA'] + '/feature_data.pkl')
+    feature_df = add_pca_cols(feature_df, n_components=0.9)
 
-    feature_extractions_args = {'feature_list': cfg['FEATURES'],
-                                'sampling_rate': cfg['SAMPLING_RATE']}
-
-    interp_cols = cfg['INTERPOLATION_COLUMNS']
-    interp_cols = [f'{c}_{suffix}' for c in interp_cols for suffix in ['x', 'y', 'z']]
-
-    response_var_path = cfg['PATHS']['RESPONSE_VAR']
-    response_var_set = cfg['RESPONSE_VARS']
-
-    save_dir = cfg['PATHS']['FEATURE_DATA_DIR']
-
-    processed_df = preprocess_data(raw_df_path, cols, windowing_args, filtering_args,
-                                   feature_extractions_args, response_var_path,
-                                   response_var_set, interp_cols, save_dir)
-
-    logging.info('Done')
+    # Save data file
+    file_save_path = 'data/features/v3/feature_data.pkl'
+    with open(file_save_path, 'wb') as f:
+        pickle.dump(feature_df, f)
