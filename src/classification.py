@@ -26,12 +26,9 @@ if __name__ == '__main__':
     label_cols = cfg['RESPONSE_VARS']
 
     gt_metric = 'perceived_exertion'  # One of {'perceived_exertion', 'perceived_enjoyment', 'game_performance'}
-    feature_data_type = 'kinematic'  # One of {'kinematic', 'PCA'}
+    feature_data_type = 'PCA'  # One of {'kinematic', 'PCA'}
 
     for gt_metric in label_cols:
-        if gt_metric == 'perceived_exertion':
-            continue  # Already done
-
         X_kin, X_pca, y_all, groups = slice_features_and_labels(dataset, label_cols)
         X = X_kin if feature_data_type == 'kinematic' else X_pca
         y = y_all[gt_metric].values
